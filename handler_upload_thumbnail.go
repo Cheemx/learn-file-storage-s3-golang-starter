@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -81,7 +83,14 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "malformed file format", err)
 		return
 	}
-	datafile := fmt.Sprintf("%s.%s", videoID, fileExt[1])
+	b := make([]byte, 32)
+	_, err = rand.Read(b)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error updating thumbnail filename", err)
+		return
+	}
+	imgID := base64.RawURLEncoding.EncodeToString(b)
+	datafile := fmt.Sprintf("%s.%s", imgID, fileExt[1])
 	filename := filepath.Join(cfg.assetsRoot, datafile)
 	imgFile, err := os.Create(filename)
 	if err != nil {
@@ -105,5 +114,15 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, vid)
+	updatedVid, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusBadRequest, "error getting video from db", err)
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "error getting video from db", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, updatedVid)
 }
