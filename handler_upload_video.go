@@ -101,15 +101,15 @@ type Streams struct {
 	NbFrames           string      `json:"nb_frames"`
 	ExtradataSize      int         `json:"extradata_size"`
 	Disposition        Disposition `json:"disposition"`
-	Tags               Tags        `json:"tags,omitempty"`
+	Tags               Tags        `json:"tags0,omitempty"`
 	SampleFmt          string      `json:"sample_fmt,omitempty"`
 	SampleRate         string      `json:"sample_rate,omitempty"`
 	Channels           int         `json:"channels,omitempty"`
 	ChannelLayout      string      `json:"channel_layout,omitempty"`
 	BitsPerSample      int         `json:"bits_per_sample,omitempty"`
 	InitialPadding     int         `json:"initial_padding,omitempty"`
-	Tags0              Tags0       `json:"tags,omitempty"`
-	Tags1              Tags1       `json:"tags,omitempty"`
+	Tags0              Tags0       `json:"tags1,omitempty"`
+	Tags1              Tags1       `json:"tags2,omitempty"`
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -185,10 +185,40 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// fast-start processing on temp path
+	processedFilePath, err := processVideoForFastStart(filepath.Join("", tmpFile.Name()))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error processing file for fast start", err)
+		return
+	}
+	ok, err := hasFastStartMoov(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error verifying moov atom", err)
+		return
+	}
+	if !ok {
+		respondWithError(w, http.StatusInternalServerError, "moov atom not at start of file", nil)
+		return
+	}
+
 	// get and set aspect ratio
-	aspectRatio, err := getVideoAspectRatio(filepath.Join("", tmpFile.Name()))
+	aspectRatio, err := getVideoAspectRatio(processedFilePath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "error getting aspect ratio of file", err)
+		return
+	}
+
+	// get file for processed name
+	f, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error opening processed file", err)
+		return
+	}
+	defer f.Close()
+	defer os.Remove(processedFilePath)
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error reading seeking to start in processed file", err)
 		return
 	}
 
@@ -203,12 +233,15 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	fileKey := fmt.Sprintf("%s/%s.%s", aspectRatio, key, fileExt[1])
 
 	// put the video in S3
-	cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
+	if _, err := cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &fileKey,
-		Body:        tmpFile,
+		Body:        f,
 		ContentType: &mType,
-	})
+	}); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "s3 upload failed", err)
+		return
+	}
 
 	// Updating the videoURL in database
 	vidURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileKey)
@@ -273,4 +306,61 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
+}
+
+func processVideoForFastStart(inPath string) (string, error) {
+	// ensure the output ends with .mp4
+	outPath := inPath + ".processing.mp4"
+
+	cmd := exec.Command(
+		"ffmpeg",
+		"-i", inPath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		"-f", "mp4",
+		outPath,
+	)
+	// capture stderr to see ffmpeg errors
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffmpeg failed: %v: %s", err, stderr.String())
+	}
+	return outPath, nil
+}
+
+func hasFastStartMoov(filePath string) (bool, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "trace",
+		"-i", filePath,
+	)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out // ffprobe writes trace to stderr
+
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	lines := strings.Split(out.String(), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "type:'moov'") {
+			// check if moov came before mdat
+			for j := i + 1; j < len(lines); j++ {
+				if strings.Contains(lines[j], "type:'mdat'") {
+					// found mdat after moov → good
+					return true, nil
+				}
+			}
+			// found moov but no mdat after
+			return false, nil
+		}
+		if strings.Contains(line, "type:'mdat'") {
+			// mdat came before moov → bad
+			return false, nil
+		}
+	}
+	return false, fmt.Errorf("moov atom not found in %s", filePath)
 }
