@@ -20,7 +20,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -252,7 +251,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Updating the videoURL in database
-	vidURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, fileKey)
+	vidURL := fmt.Sprintf("%s/%s", cfg.s3CfDistribution, fileKey)
 	vid.VideoURL = &vidURL
 
 	err = cfg.db.UpdateVideo(vid)
@@ -261,7 +260,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updatedVid, err := cfg.dbVideoToSignedVideo(vid)
+	updatedVid, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			respondWithError(w, http.StatusBadRequest, "error getting video from db", err)
@@ -273,38 +272,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	respondWithJSON(w, http.StatusOK, updatedVid)
 
-}
-
-func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
-	s3PresignClient := s3.NewPresignClient(s3Client)
-	req, err := s3PresignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	}, s3.WithPresignExpires(expireTime))
-	if err != nil {
-		return "", err
-	}
-
-	return req.URL, nil
-}
-
-func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
-	if video.VideoURL == nil {
-		return video, fmt.Errorf("video_url is nil")
-	}
-	parts := strings.SplitN(*video.VideoURL, ",", 2)
-	if len(parts) != 2 {
-		return video, fmt.Errorf("video_url not in 'bucket,key' format")
-	}
-	bucket, key := parts[0], parts[1]
-
-	url, err := generatePresignedURL(cfg.s3Client, bucket, key, 1*time.Minute)
-	if err != nil {
-		return video, err
-	}
-	v := video
-	v.VideoURL = &url
-	return v, nil // don’t persist the signed URL
 }
 
 func getVideoAspectRatio(filePath string) (string, error) {

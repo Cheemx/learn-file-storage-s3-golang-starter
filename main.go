@@ -27,11 +27,6 @@ type apiConfig struct {
 	s3Client         *s3.Client
 }
 
-type thumbnail struct {
-	data      []byte
-	mediaType string
-}
-
 func main() {
 	godotenv.Load(".env")
 
